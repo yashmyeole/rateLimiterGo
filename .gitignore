@@ -1,0 +1,16 @@
+# Compiled binaries (we build into bin/ on purpose so they never get committed)
+bin/
+*.exe
+*.test
+*.out
+
+# Go build cache / coverage
+coverage.txt
+
+# Editor + OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Secrets (Redis URLs etc. come in Phase 9+)
+.env
