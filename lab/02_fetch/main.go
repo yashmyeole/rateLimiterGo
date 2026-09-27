@@ -8,21 +8,19 @@ import (
 )
 
 func main() {
-	
+
 	url := "https://go.dev"
 
-	
 	if len(os.Args) > 1 {
 		url = os.Args[1]
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	
 	resp, err := client.Get(url)
 	if err != nil {
 		fmt.Println("request failed:", err)
-		os.Exit(1) 
+		os.Exit(1)
 	}
 
 	defer resp.Body.Close()
