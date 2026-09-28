@@ -33,7 +33,9 @@ func (b *backend) list(data any) http.HandlerFunc {
 			slog.Error("write response", "path", r.URL.Path, "err", err)
 			return
 		}
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "took", time.Since(start))
+		// Behind the proxy, remote is always the proxy; forwarded_for is the real client.
+		slog.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+			"forwarded_for", r.Header.Get("X-Forwarded-For"), "took", time.Since(start))
 	}
 }
 

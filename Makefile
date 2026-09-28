@@ -1,7 +1,7 @@
-.PHONY: build test vet backends
+.PHONY: build test vet backends proxy
 
 build:
-	go build -o bin/backend ./cmd/backend
+	go build -o bin/ ./cmd/...
 
 test:
 	go test ./...
@@ -17,3 +17,7 @@ backends: build
 	./bin/backend -name api-2 -addr localhost:9002 & \
 	./bin/backend -name api-3 -addr localhost:9003 & \
 	wait
+
+# The proxy on :8080, forwarding to the first backend. Run `make backends` in another terminal.
+proxy: build
+	./bin/proxy
