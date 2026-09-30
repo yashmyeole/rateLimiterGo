@@ -3,8 +3,9 @@
 build:
 	go build -o bin/ ./cmd/...
 
+# -race: the proxy runs handlers concurrently, so every test run checks for data races.
 test:
-	go test ./...
+	go test -race ./...
 
 vet:
 	go vet ./...
@@ -18,6 +19,6 @@ backends: build
 	./bin/backend -name api-3 -addr localhost:9003 & \
 	wait
 
-# The proxy on :8080, forwarding to the first backend. Run `make backends` in another terminal.
+# The proxy on :8080, sending requests to the three backends in turn. Run `make backends` in another terminal.
 proxy: build
 	./bin/proxy

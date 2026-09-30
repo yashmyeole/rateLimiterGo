@@ -3,7 +3,7 @@
 A reverse proxy with a distributed rate limiter, written in Go. Built to learn Go and
 backend fundamentals.
 
-**Status:** work in progress. The proxy forwards to a single backend; load balancing across all three is next.
+**Status:** work in progress. The proxy load-balances across three backends (round robin); health checks are next.
 
 ## Goal
 
@@ -20,14 +20,19 @@ Requires Go 1.27+.
 
 ```sh
 make backends                        # terminal 1: backends on :9001, :9002, :9003 (Ctrl-C stops all)
-make proxy                           # terminal 2: proxy on :8080, forwarding to :9001
+make proxy                           # terminal 2: proxy on :8080, sending requests to the backends in turn
 curl -i localhost:8080/api/users     # the X-Backend header names the instance that answered
+
+# six requests: api-1, api-2, api-3, api-1, api-2, api-3
+for i in 1 2 3 4 5 6; do curl -s -o /dev/null -D - localhost:8080/api/users | grep X-Backend; done
 ```
 
 Each backend serves `GET /api/users`, `/api/orders`, `/api/quotes` and `/healthz`.
-The proxy passes requests through unchanged, sets `X-Forwarded-For` to the real client IP
-(ignoring any value the client sent), and returns a JSON `502` if the backend is down or a
-`504` if it doesn't start answering within `-timeout` (default 5s).
+
+The proxy picks backends round robin (set them with `-backends`, comma-separated URLs) and
+passes requests through unchanged. It sets `X-Forwarded-For` to the real client IP, ignoring
+any value the client sent, and returns a JSON `502` if the chosen backend is down or a `504`
+if it doesn't start answering within `-timeout` (default 5s).
 
 To simulate a slow service, run one by hand with a delay:
 
@@ -35,13 +40,13 @@ To simulate a slow service, run one by hand with a delay:
 ./bin/backend -name api-2 -addr localhost:9002 -delay 300ms -jitter 100ms
 ```
 
-`make test` and `make vet` run the tests and `go vet`.
+`make test` runs the tests with the race detector; `make vet` runs `go vet`.
 
 ## Layout
 
 - `lab/`: small Go exercises, one folder per concept
 - `cmd/backend/`: fake API service used as the proxy's target
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
-- `internal/proxy/`: request forwarding and backend error handling
+- `internal/proxy/`: request forwarding, round-robin load balancing, backend error handling
 - `internal/`: limiter and metrics packages (coming)
 - `docs/`: design notes and benchmark results (coming)

@@ -10,16 +10,48 @@ import (
 	"time"
 )
 
-// startProxy runs New(backendURL) on a real local port and returns its URL.
-func startProxy(t *testing.T, backendURL string, timeout time.Duration) string {
+// startProxy runs a round-robin proxy over backendURLs on a real local port and
+// returns its URL.
+func startProxy(t *testing.T, timeout time.Duration, backendURLs ...string) string {
 	t.Helper()
-	target, err := url.Parse(backendURL)
+	var targets []*url.URL
+	for _, raw := range backendURLs {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, u)
+	}
+	rr, err := NewRoundRobin(targets)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(target, timeout))
+	srv := httptest.NewServer(New(rr, timeout))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestSpreadsRequestsAcrossBackends(t *testing.T) {
+	var urls []string
+	for _, name := range []string{"api-1", "api-2", "api-3"} {
+		b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", name)
+		}))
+		defer b.Close()
+		urls = append(urls, b.URL)
+	}
+	proxyURL := startProxy(t, time.Second, urls...)
+
+	for i, want := range []string{"api-1", "api-2", "api-3", "api-1", "api-2", "api-3"} {
+		resp, err := http.Get(proxyURL + "/api/users")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("X-Backend"); got != want {
+			t.Errorf("request %d went to %s, want %s", i+1, got, want)
+		}
+	}
 }
 
 func TestForwardsRequestAndResponse(t *testing.T) {
@@ -30,7 +62,7 @@ func TestForwardsRequestAndResponse(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	resp, err := http.Get(startProxy(t, backend.URL, time.Second) + "/api/users?limit=2")
+	resp, err := http.Get(startProxy(t, time.Second, backend.URL) + "/api/users?limit=2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +88,7 @@ func TestSetsXForwardedForAndDropsSpoofedValue(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	req, _ := http.NewRequest("GET", startProxy(t, backend.URL, time.Second)+"/", nil)
+	req, _ := http.NewRequest("GET", startProxy(t, time.Second, backend.URL)+"/", nil)
 	req.Header.Set("X-Forwarded-For", "6.6.6.6") // a client pretending to be someone else
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -96,7 +128,7 @@ func TestBackendErrors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := http.Get(startProxy(t, tc.backendURL, 100*time.Millisecond) + "/api/users")
+			resp, err := http.Get(startProxy(t, 100*time.Millisecond, tc.backendURL) + "/api/users")
 			if err != nil {
 				t.Fatal(err)
 			}
