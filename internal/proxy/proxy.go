@@ -1,4 +1,4 @@
-// Package proxy forwards client requests to a backend and relays the response.
+// Package proxy forwards client requests to healthy backends and relays the response.
 package proxy
 
 import (
@@ -11,24 +11,35 @@ import (
 	"time"
 )
 
-// New returns a reverse proxy that sends each request to the backend b picks. If that
-// backend hasn't started answering within timeout, the client gets a 504.
-func New(b Balancer, timeout time.Duration) *httputil.ReverseProxy {
+// New returns a handler that sends each request to the backend b picks, or answers 503
+// if b has none. If the backend hasn't started answering within timeout, the client
+// gets a 504.
+func New(b Balancer, timeout time.Duration) http.Handler {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = timeout
 
-	return &httputil.ReverseProxy{
-		// Rewrite builds the outbound request and runs once per request, so every
-		// request asks the balancer for a backend. ReverseProxy has already stripped any
-		// X-Forwarded-* headers the client sent, so a client can't fake its IP;
-		// SetXForwarded then records the real one.
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(b.Pick())
-			pr.SetXForwarded()
-		},
-		Transport:    transport,
-		ErrorHandler: writeError,
-	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := b.Pick()
+		if target == nil {
+			slog.Warn("no healthy backends", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusServiceUnavailable, "no healthy backends")
+			return
+		}
+
+		// A ReverseProxy is a small struct, so building one per request is cheap; the
+		// Transport, which holds the pooled backend connections, is shared.
+		rp := &httputil.ReverseProxy{
+			// ReverseProxy has already stripped any X-Forwarded-* headers the client
+			// sent, so a client can't fake its IP; SetXForwarded records the real one.
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(target)
+				pr.SetXForwarded()
+			},
+			Transport:    transport,
+			ErrorHandler: writeError,
+		}
+		rp.ServeHTTP(w, r)
+	})
 }
 
 // writeError answers when the backend can't be reached (502) or is too slow (504).
@@ -41,7 +52,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status, msg = http.StatusGatewayTimeout, "backend timed out"
 	}
 	slog.Warn("proxy error", "backend", r.URL.Host, "method", r.Method, "path", r.URL.Path, "status", status, "err", err)
+	writeJSONError(w, status, msg)
+}
 
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})

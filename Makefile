@@ -14,9 +14,9 @@ vet:
 # non-interactive shell ignore SIGINT, so the trap sends SIGTERM to the whole group.
 backends: build
 	@trap 'kill 0' INT TERM; \
-	./bin/backend -name api-1 -addr localhost:9001 & \
-	./bin/backend -name api-2 -addr localhost:9002 & \
-	./bin/backend -name api-3 -addr localhost:9003 & \
+	./bin/backend -name api-1 -addr 127.0.0.1:9001 & \
+	./bin/backend -name api-2 -addr 127.0.0.1:9002 & \
+	./bin/backend -name api-3 -addr 127.0.0.1:9003 & \
 	wait
 
 # The proxy on :8080, sending requests to the three backends in turn. Run `make backends` in another terminal.

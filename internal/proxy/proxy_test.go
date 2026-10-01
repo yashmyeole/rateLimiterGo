@@ -22,13 +22,35 @@ func startProxy(t *testing.T, timeout time.Duration, backendURLs ...string) stri
 		}
 		targets = append(targets, u)
 	}
-	rr, err := NewRoundRobin(targets)
+	pool, err := NewPool(targets)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(rr, timeout))
+	srv := httptest.NewServer(New(NewRoundRobin(pool), timeout))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestNoHealthyBackends(t *testing.T) {
+	pool, err := NewPool([]*url.URL{{Scheme: "http", Host: "b1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.SetHealthy(pool.All()[0], false)
+	srv := httptest.NewServer(New(NewRoundRobin(pool), time.Second))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+
+	if resp.StatusCode != http.StatusServiceUnavailable || body["error"] != "no healthy backends" {
+		t.Errorf("got %d %v, want 503 with error \"no healthy backends\"", resp.StatusCode, body)
+	}
 }
 
 func TestSpreadsRequestsAcrossBackends(t *testing.T) {

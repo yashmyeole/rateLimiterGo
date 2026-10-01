@@ -1,34 +1,53 @@
 package proxy
 
 import (
-	"net/url"
+	"slices"
 	"sync"
 	"testing"
 )
 
-func testBackends() []*url.URL {
-	return []*url.URL{
-		{Scheme: "http", Host: "b1"},
-		{Scheme: "http", Host: "b2"},
-		{Scheme: "http", Host: "b3"},
+func picks(b Balancer, n int) []string {
+	var got []string
+	for range n {
+		if u := b.Pick(); u != nil {
+			got = append(got, u.Host)
+		} else {
+			got = append(got, "<nil>")
+		}
 	}
+	return got
 }
 
 func TestRoundRobinOrder(t *testing.T) {
-	rr, err := NewRoundRobin(testBackends())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, want := range []string{"b1", "b2", "b3", "b1", "b2", "b3", "b1"} {
-		if got := rr.Pick().Host; got != want {
-			t.Errorf("pick %d = %s, want %s", i+1, got, want)
-		}
+	got := picks(NewRoundRobin(testPool(t)), 7)
+	if want := []string{"b1", "b2", "b3", "b1", "b2", "b3", "b1"}; !slices.Equal(got, want) {
+		t.Errorf("picks = %v, want %v", got, want)
 	}
 }
 
-func TestRoundRobinRejectsEmpty(t *testing.T) {
-	if _, err := NewRoundRobin(nil); err == nil {
-		t.Error("NewRoundRobin(nil) returned no error")
+func TestRoundRobinSkipsUnhealthy(t *testing.T) {
+	pool := testPool(t)
+	rr := NewRoundRobin(pool)
+	b2 := pool.All()[1]
+
+	pool.SetHealthy(b2, false)
+	if got := picks(rr, 4); slices.Contains(got, "b2") {
+		t.Errorf("picked unhealthy b2: %v", got)
+	}
+
+	pool.SetHealthy(b2, true)
+	if got := picks(rr, 3); !slices.Contains(got, "b2") {
+		t.Errorf("b2 is healthy again but wasn't picked: %v", got)
+	}
+}
+
+func TestRoundRobinNoneHealthy(t *testing.T) {
+	pool := testPool(t)
+	for _, u := range pool.All() {
+		pool.SetHealthy(u, false)
+	}
+	if u := NewRoundRobin(pool).Pick(); u != nil {
+		t.Errorf("Pick() = %v, want nil", u)
 	}
 }
 
@@ -36,10 +55,7 @@ func TestRoundRobinRejectsEmpty(t *testing.T) {
 // exactly once, so 9000 picks over 3 backends must be exactly 3000 each. With a
 // non-atomic counter, picks get lost and `go test -race` reports a data race.
 func TestRoundRobinConcurrentPicksAreEven(t *testing.T) {
-	rr, err := NewRoundRobin(testBackends())
-	if err != nil {
-		t.Fatal(err)
-	}
+	rr := NewRoundRobin(testPool(t))
 	const workers, picksEach = 9, 1000
 
 	perWorker := make([]map[string]int, workers) // each goroutine writes only its own slot

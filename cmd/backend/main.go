@@ -20,7 +20,7 @@ type backend struct {
 
 func main() {
 	name := flag.String("name", "api-1", "instance name, sent back in the X-Backend header")
-	addr := flag.String("addr", "localhost:9001", "listen address (use :9001 to accept connections from other machines)")
+	addr := flag.String("addr", "127.0.0.1:9001", "listen address (use :9001 to accept connections from other machines)")
 	delay := flag.Duration("delay", 0, "fixed delay added to every /api response, e.g. 200ms")
 	jitter := flag.Duration("jitter", 0, "extra random delay, anywhere from 0 up to this value")
 	flag.Parse()

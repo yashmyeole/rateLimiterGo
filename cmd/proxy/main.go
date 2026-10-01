@@ -1,8 +1,10 @@
-// Command proxy is the reverse proxy in front of the backend services.
-// It spreads requests across the backends in turn (round robin).
+// Command proxy is the reverse proxy in front of the backend services. It spreads
+// requests across the healthy backends in turn (round robin), probes each backend's
+// /healthz in the background, and shuts down gracefully on Ctrl-C or SIGTERM.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,17 +12,27 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yashmyeole/ratelimiter-go/internal/proxy"
 )
 
+// healthWorkers caps how many health probes run at once.
+const healthWorkers = 4
+
 func main() {
 	addr := flag.String("addr", "localhost:8080", "listen address")
-	backends := flag.String("backends", "http://localhost:9001,http://localhost:9002,http://localhost:9003",
+	// 127.0.0.1, not localhost: localhost resolves to IPv6 ::1 first, so any other program
+	// listening on [::]:9001 (a Docker container, say) would get the traffic instead of
+	// the backend, which listens on IPv4 only.
+	backends := flag.String("backends", "http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003",
 		"comma-separated backend URLs, used in turn")
 	timeout := flag.Duration("timeout", 5*time.Second, "how long to wait for a backend to start answering before returning 504")
+	healthInterval := flag.Duration("health-interval", 2*time.Second, "how often to probe each backend's /healthz")
+	healthTimeout := flag.Duration("health-timeout", time.Second, "how long a probe may take before the backend counts as down")
 	flag.Parse()
 
 	targets, err := parseBackends(*backends)
@@ -28,15 +40,22 @@ func main() {
 		slog.Error("invalid -backends", "err", err)
 		os.Exit(1)
 	}
-	balancer, err := proxy.NewRoundRobin(targets)
+	pool, err := proxy.NewPool(targets)
 	if err != nil {
 		slog.Error("invalid -backends", "err", err)
 		os.Exit(1)
 	}
 
+	// ctx is canceled on Ctrl-C (SIGINT) or SIGTERM, which is what `docker stop`,
+	// Kubernetes and most hosting platforms send before killing a process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go proxy.NewChecker(pool, *healthInterval, *healthTimeout, healthWorkers).Run(ctx)
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           proxy.New(balancer, *timeout),
+		Handler:           proxy.New(proxy.NewRoundRobin(pool), *timeout),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		// Must outlast the backend timeout, or the proxy would cut off its own 504.
@@ -44,11 +63,31 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	slog.Info("proxy listening", "addr", *addr, "backends", *backends, "timeout", *timeout)
-	if err := srv.ListenAndServe(); err != nil {
+	// ListenAndServe blocks until the server stops, so it runs in its own goroutine
+	// and reports how it ended on a channel.
+	slog.Info("proxy listening", "addr", *addr, "backends", *backends, "timeout", *timeout,
+		"health_interval", *healthInterval)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr: // it never started, e.g. the port is already in use
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
+	case <-ctx.Done():
 	}
+	stop() // restore default signal handling: a second Ctrl-C now kills immediately
+
+	// Shutdown stops accepting connections, then waits for in-flight requests to finish.
+	// The limit matches WriteTimeout, the longest any request can legitimately take.
+	slog.Info("shutting down, waiting for in-flight requests")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), *timeout+5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown did not finish cleanly", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("stopped")
 }
 
 // parseBackends turns "http://a:1,http://b:2" into URLs. url.Parse accepts almost
@@ -62,7 +101,7 @@ func parseBackends(s string) ([]*url.URL, error) {
 		}
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, fmt.Errorf("%q is not a backend URL like http://localhost:9001", raw)
+			return nil, fmt.Errorf("%q is not a backend URL like http://127.0.0.1:9001", raw)
 		}
 		targets = append(targets, u)
 	}

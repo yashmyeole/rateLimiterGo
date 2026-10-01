@@ -3,7 +3,8 @@
 A reverse proxy with a distributed rate limiter, written in Go. Built to learn Go and
 backend fundamentals.
 
-**Status:** work in progress. The proxy load-balances across three backends (round robin); health checks are next.
+**Status:** work in progress. The proxy load-balances across healthy backends and shuts down
+gracefully; rate limiting is next.
 
 ## Goal
 
@@ -34,10 +35,15 @@ passes requests through unchanged. It sets `X-Forwarded-For` to the real client 
 any value the client sent, and returns a JSON `502` if the chosen backend is down or a `504`
 if it doesn't start answering within `-timeout` (default 5s).
 
+Every `-health-interval` (default 2s) the proxy probes each backend's `/healthz` and stops
+sending traffic to any that fail; they rejoin once a probe passes. If no backend is healthy
+it answers `503`. Ctrl-C (or SIGTERM) stops new connections and lets in-flight requests
+finish before exiting.
+
 To simulate a slow service, run one by hand with a delay:
 
 ```sh
-./bin/backend -name api-2 -addr localhost:9002 -delay 300ms -jitter 100ms
+./bin/backend -name api-2 -addr 127.0.0.1:9002 -delay 300ms -jitter 100ms
 ```
 
 `make test` runs the tests with the race detector; `make vet` runs `go vet`.
@@ -47,6 +53,6 @@ To simulate a slow service, run one by hand with a delay:
 - `lab/`: small Go exercises, one folder per concept
 - `cmd/backend/`: fake API service used as the proxy's target
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
-- `internal/proxy/`: request forwarding, round-robin load balancing, backend error handling
+- `internal/proxy/`: request forwarding, round-robin load balancing, health checks, backend error handling
 - `internal/`: limiter and metrics packages (coming)
 - `docs/`: design notes and benchmark results (coming)

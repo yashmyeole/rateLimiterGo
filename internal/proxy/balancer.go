@@ -1,13 +1,13 @@
 package proxy
 
 import (
-	"errors"
 	"net/url"
 	"sync/atomic"
 )
 
-// Balancer chooses the backend for the next request. The proxy depends only on this
-// interface, so other strategies (least connections, weighted) can be swapped in.
+// Balancer chooses the backend for the next request, or returns nil if there is none
+// to use. The proxy depends only on this interface, so other strategies (least
+// connections, weighted) can be swapped in.
 type Balancer interface {
 	Pick() *url.URL
 }
@@ -16,24 +16,25 @@ type Balancer interface {
 // the build fails here instead of somewhere far away.
 var _ Balancer = (*RoundRobin)(nil)
 
-// RoundRobin hands out backends in turn: 1, 2, 3, 1, 2, 3, ...
+// RoundRobin hands out the pool's healthy backends in turn: 1, 2, 3, 1, 2, 3, ...
+// When one goes down, the rotation continues over the rest.
 type RoundRobin struct {
-	backends []*url.URL
-	next     atomic.Uint64
+	pool *Pool
+	next atomic.Uint64
 }
 
-// NewRoundRobin returns a RoundRobin over backends, which must not be empty.
-func NewRoundRobin(backends []*url.URL) (*RoundRobin, error) {
-	if len(backends) == 0 {
-		return nil, errors.New("round robin needs at least one backend")
-	}
-	return &RoundRobin{backends: backends}, nil
+func NewRoundRobin(pool *Pool) *RoundRobin {
+	return &RoundRobin{pool: pool}
 }
 
 // Pick is called from many request goroutines at once. A plain counter++ is a
 // read-modify-write that two goroutines can interleave (both read 5, both write 6,
 // one pick is lost); the atomic Add makes it one indivisible step.
 func (rr *RoundRobin) Pick() *url.URL {
+	up := rr.pool.Healthy()
+	if len(up) == 0 {
+		return nil
+	}
 	n := rr.next.Add(1) - 1 // Add returns the new value; -1 so the first pick is index 0
-	return rr.backends[n%uint64(len(rr.backends))]
+	return up[n%uint64(len(up))]
 }
