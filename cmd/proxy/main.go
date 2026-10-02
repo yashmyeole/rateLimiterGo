@@ -1,6 +1,7 @@
-// Command proxy is the reverse proxy in front of the backend services. It spreads
-// requests across the healthy backends in turn (round robin), probes each backend's
-// /healthz in the background, and shuts down gracefully on Ctrl-C or SIGTERM.
+// Command proxy is the reverse proxy in front of the backend services. It rate-limits
+// each client IP, spreads requests across the healthy backends in turn (round robin),
+// probes each backend's /healthz in the background, and shuts down gracefully on
+// Ctrl-C or SIGTERM.
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yashmyeole/ratelimiter-go/internal/limit"
 	"github.com/yashmyeole/ratelimiter-go/internal/proxy"
 )
 
@@ -33,6 +35,8 @@ func main() {
 	timeout := flag.Duration("timeout", 5*time.Second, "how long to wait for a backend to start answering before returning 504")
 	healthInterval := flag.Duration("health-interval", 2*time.Second, "how often to probe each backend's /healthz")
 	healthTimeout := flag.Duration("health-timeout", time.Second, "how long a probe may take before the backend counts as down")
+	rate := flag.Float64("rate", 10, "requests per second allowed per client IP; 0 turns rate limiting off")
+	burst := flag.Int("burst", 20, "requests a client may make at once before -rate applies")
 	flag.Parse()
 
 	targets, err := parseBackends(*backends)
@@ -53,9 +57,23 @@ func main() {
 
 	go proxy.NewChecker(pool, *healthInterval, *healthTimeout, healthWorkers).Run(ctx)
 
+	// The limiter wraps the proxy, so a request over the limit gets its 429 before any
+	// backend is picked or contacted.
+	var handler http.Handler = proxy.New(proxy.NewRoundRobin(pool), *timeout)
+	if *rate > 0 {
+		limiter, err := limit.NewTokenBucket(*rate, *burst)
+		if err != nil {
+			slog.Error("invalid -rate or -burst", "err", err)
+			os.Exit(1)
+		}
+		handler = limit.Middleware(limiter, limit.ClientIP)(handler)
+	} else {
+		slog.Warn("rate limiting is off (-rate 0)")
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           proxy.New(proxy.NewRoundRobin(pool), *timeout),
+		Handler:           handler,
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		// Must outlast the backend timeout, or the proxy would cut off its own 504.
@@ -66,7 +84,7 @@ func main() {
 	// ListenAndServe blocks until the server stops, so it runs in its own goroutine
 	// and reports how it ended on a channel.
 	slog.Info("proxy listening", "addr", *addr, "backends", *backends, "timeout", *timeout,
-		"health_interval", *healthInterval)
+		"health_interval", *healthInterval, "rate", *rate, "burst", *burst)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
