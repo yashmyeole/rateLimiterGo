@@ -4,8 +4,8 @@ A reverse proxy with a distributed rate limiter, written in Go. Built to learn G
 backend fundamentals.
 
 **Status:** work in progress. The proxy rate-limits each client IP (in-memory token bucket),
-load-balances across healthy backends and shuts down gracefully. Next: evicting idle clients,
-then moving the limiter into Redis.
+load-balances across healthy backends and shuts down gracefully. Next: moving the limiter into
+Redis so several proxy replicas share one limit.
 
 ## Goal
 
@@ -40,7 +40,9 @@ Each client IP gets a token bucket: up to `-burst` requests at once (default 20)
 `-rate` requests per second (default 10; `-rate 0` turns limiting off). Over the limit the proxy
 answers `429` with `Retry-After`, without contacting a backend. Every response carries
 `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The client is identified by the connection's
-IP; `X-Forwarded-For` sent by a client is ignored, since anyone can set it.
+IP; `X-Forwarded-For` sent by a client is ignored, since anyone can set it. Every 30s a
+background sweep deletes buckets that have refilled completely (a full bucket behaves exactly
+like a new one), so memory stays flat no matter how many clients come and go.
 
 ```sh
 # 30 quick requests: about 20 pass, the rest get 429
@@ -58,7 +60,9 @@ To simulate a slow service, run one by hand with a delay:
 ./bin/backend -name api-2 -addr 127.0.0.1:9002 -delay 300ms -jitter 100ms
 ```
 
-`make test` runs the tests with the race detector; `make vet` runs `go vet`.
+`make test` runs the tests with the race detector; `make vet` runs `go vet`. `make bench` runs
+the limiter benchmarks and `SOAK=10m make soak` a memory soak; measured numbers are in
+[docs/RESULTS.md](docs/RESULTS.md).
 
 ## Layout
 
@@ -66,6 +70,6 @@ To simulate a slow service, run one by hand with a delay:
 - `cmd/backend/`: fake API service used as the proxy's target
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
 - `internal/proxy/`: request forwarding, round-robin load balancing, health checks, backend error handling
-- `internal/limit/`: `Limiter` interface, in-memory token bucket, rate-limit middleware
+- `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, rate-limit middleware
 - `internal/`: metrics package (coming)
-- `docs/`: design notes and benchmark results (coming)
+- `docs/RESULTS.md`: measured numbers and how to reproduce them

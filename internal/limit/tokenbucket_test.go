@@ -9,11 +9,24 @@ import (
 )
 
 // fakeClock is a clock the test moves by hand, so refill math can be checked exactly
-// without real waiting.
-type fakeClock struct{ t time.Time }
+// without real waiting. The mutex lets a janitor goroutine read it while the test
+// advances it.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
-func (c *fakeClock) Now() time.Time          { return c.t }
-func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 func newTestBucket(t *testing.T, rate float64, burst int) (*TokenBucket, *fakeClock) {
 	t.Helper()

@@ -22,8 +22,10 @@ import (
 	"github.com/yashmyeole/ratelimiter-go/internal/proxy"
 )
 
-// healthWorkers caps how many health probes run at once.
-const healthWorkers = 4
+const (
+	healthWorkers   = 4                // how many health probes may run at once
+	janitorInterval = 30 * time.Second // how often idle clients' buckets are deleted
+)
 
 func main() {
 	addr := flag.String("addr", "localhost:8080", "listen address")
@@ -66,6 +68,7 @@ func main() {
 			slog.Error("invalid -rate or -burst", "err", err)
 			os.Exit(1)
 		}
+		go limiter.RunJanitor(ctx, janitorInterval)
 		handler = limit.Middleware(limiter, limit.ClientIP)(handler)
 	} else {
 		slog.Warn("rate limiting is off (-rate 0)")

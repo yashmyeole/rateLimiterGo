@@ -1,4 +1,4 @@
-.PHONY: build test vet backends proxy
+.PHONY: build test vet bench soak backends proxy
 
 build:
 	go build -o bin/ ./cmd/...
@@ -9,6 +9,14 @@ test:
 
 vet:
 	go vet ./...
+
+# Limiter benchmarks on 1, 4 and 10 CPUs (results in docs/RESULTS.md).
+bench:
+	go test -run '^$$' -bench . -benchmem -cpu 1,4,10 ./internal/limit
+
+# Limiter memory over time with the janitor running: SOAK=10m make soak
+soak:
+	go test -run 'TestSoak/^janitor$$' -v -timeout 0 ./internal/limit
 
 # Three backend instances on :9001-9003. Ctrl-C stops all of them: background jobs in a
 # non-interactive shell ignore SIGINT, so the trap sends SIGTERM to the whole group.
