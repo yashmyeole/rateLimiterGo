@@ -38,7 +38,10 @@ func main() {
 	healthInterval := flag.Duration("health-interval", 2*time.Second, "how often to probe each backend's /healthz")
 	healthTimeout := flag.Duration("health-timeout", time.Second, "how long a probe may take before the backend counts as down")
 	rate := flag.Float64("rate", 10, "requests per second allowed per client IP; 0 turns rate limiting off")
-	burst := flag.Int("burst", 20, "requests a client may make at once before -rate applies")
+	algorithm := flag.String("algorithm", "token-bucket", "rate-limit algorithm: token-bucket (in memory) or fixed-window (needs -redis)")
+	burst := flag.Int("burst", 20, "token-bucket only: requests a client may make at once before -rate applies")
+	window := flag.Duration("window", 10*time.Second, "fixed-window only: window length; each window allows -rate x -window requests")
+	redisAddr := flag.String("redis", "", "Redis address, e.g. 127.0.0.1:6379, so every proxy replica shares the same limits")
 	flag.Parse()
 
 	targets, err := parseBackends(*backends)
@@ -59,16 +62,19 @@ func main() {
 
 	go proxy.NewChecker(pool, *healthInterval, *healthTimeout, healthWorkers).Run(ctx)
 
+	limiter, closeLimiter, err := newLimiter(ctx, limiterConfig{
+		algorithm: *algorithm, redisAddr: *redisAddr, rate: *rate, burst: *burst, window: *window,
+	})
+	if err != nil {
+		slog.Error("rate limiter setup failed", "err", err)
+		os.Exit(1)
+	}
+	defer closeLimiter()
+
 	// The limiter wraps the proxy, so a request over the limit gets its 429 before any
 	// backend is picked or contacted.
 	var handler http.Handler = proxy.New(proxy.NewRoundRobin(pool), *timeout)
-	if *rate > 0 {
-		limiter, err := limit.NewTokenBucket(*rate, *burst)
-		if err != nil {
-			slog.Error("invalid -rate or -burst", "err", err)
-			os.Exit(1)
-		}
-		go limiter.RunJanitor(ctx, janitorInterval)
+	if limiter != nil {
 		handler = limit.Middleware(limiter, limit.ClientIP)(handler)
 	} else {
 		slog.Warn("rate limiting is off (-rate 0)")
@@ -87,7 +93,8 @@ func main() {
 	// ListenAndServe blocks until the server stops, so it runs in its own goroutine
 	// and reports how it ended on a channel.
 	slog.Info("proxy listening", "addr", *addr, "backends", *backends, "timeout", *timeout,
-		"health_interval", *healthInterval, "rate", *rate, "burst", *burst)
+		"health_interval", *healthInterval, "algorithm", *algorithm, "rate", *rate, "burst", *burst,
+		"window", *window, "redis", *redisAddr)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 

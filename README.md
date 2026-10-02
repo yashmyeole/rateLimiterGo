@@ -3,9 +3,9 @@
 A reverse proxy with a distributed rate limiter, written in Go. Built to learn Go and
 backend fundamentals.
 
-**Status:** work in progress. The proxy rate-limits each client IP (in-memory token bucket),
-load-balances across healthy backends and shuts down gracefully. Next: moving the limiter into
-Redis so several proxy replicas share one limit.
+**Status:** work in progress. The proxy rate-limits each client IP, in memory (token bucket) or
+shared across replicas in Redis (fixed window), load-balances across healthy backends and shuts
+down gracefully. Next: an atomic token bucket and sliding window in Redis using Lua.
 
 ## Goal
 
@@ -49,6 +49,23 @@ like a new one), so memory stays flat no matter how many clients come and go.
 for i in $(seq 30); do curl -s -o /dev/null -w "%{http_code} " localhost:8080/api/users; done; echo
 ```
 
+### Sharing limits across replicas
+
+With several proxy replicas, each one limiting on its own gives a client the full limit at
+every replica. `-redis` moves the count into Redis so all replicas share it:
+
+```sh
+make redis                           # Redis 8.10 in Docker, published on 127.0.0.1:6379 only
+make backends                        # terminal 1
+make replicas                        # terminal 2: proxies on :8080 and :8081, 10 requests per 10s per client
+for i in $(seq 20); do curl -s -o /dev/null -w "%{http_code} " localhost:$((8080 + i % 2))/api/users; done; echo
+make redis-stop
+```
+
+This uses a fixed window (`-algorithm fixed-window`, `-rate 1 -window 10s`): one counter per
+client per window. It has a known weakness at window boundaries, measured in
+[docs/decisions.md](docs/decisions.md).
+
 Every `-health-interval` (default 2s) the proxy probes each backend's `/healthz` and stops
 sending traffic to any that fail; they rejoin once a probe passes. If no backend is healthy
 it answers `503`. Ctrl-C (or SIGTERM) stops new connections and lets in-flight requests
@@ -70,6 +87,8 @@ the limiter benchmarks and `SOAK=10m make soak` a memory soak; measured numbers 
 - `cmd/backend/`: fake API service used as the proxy's target
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
 - `internal/proxy/`: request forwarding, round-robin load balancing, health checks, backend error handling
-- `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, rate-limit middleware
+- `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, Redis fixed
+  window, rate-limit middleware
 - `internal/`: metrics package (coming)
 - `docs/RESULTS.md`: measured numbers and how to reproduce them
+- `docs/decisions.md`: design decisions and their trade-offs
