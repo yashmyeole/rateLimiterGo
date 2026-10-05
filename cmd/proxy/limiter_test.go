@@ -20,12 +20,16 @@ func TestNewLimiter(t *testing.T) {
 	}{
 		{"off", limiterConfig{algorithm: "token-bucket", rate: 0}, "<nil>", false},
 		{"token bucket in memory", limiterConfig{algorithm: "token-bucket", rate: 10, burst: 20}, "*limit.TokenBucket", false},
+		{"token bucket in redis", limiterConfig{algorithm: "token-bucket", redisAddr: mr.Addr(), rate: 10, burst: 20}, "*limit.RedisTokenBucket", false},
+		{"sliding window in redis", limiterConfig{algorithm: "sliding-window", redisAddr: mr.Addr(), rate: 1, window: 10 * time.Second}, "*limit.SlidingWindow", false},
 		{"fixed window in redis", limiterConfig{algorithm: "fixed-window", redisAddr: mr.Addr(), rate: 1, window: 10 * time.Second}, "*limit.FixedWindow", false},
+		{"sliding window needs redis", limiterConfig{algorithm: "sliding-window", rate: 1, window: 10 * time.Second}, "<nil>", true},
 		{"fixed window needs redis", limiterConfig{algorithm: "fixed-window", rate: 1, window: 10 * time.Second}, "<nil>", true},
-		{"token bucket in redis not supported", limiterConfig{algorithm: "token-bucket", redisAddr: mr.Addr(), rate: 10, burst: 20}, "<nil>", true},
-		{"unknown algorithm", limiterConfig{algorithm: "leaky-bucket", rate: 10, burst: 20}, "<nil>", true},
-		{"redis unreachable", limiterConfig{algorithm: "fixed-window", redisAddr: "127.0.0.1:1", rate: 1, window: 10 * time.Second}, "<nil>", true},
-		{"invalid burst", limiterConfig{algorithm: "token-bucket", rate: 10, burst: 0}, "<nil>", true},
+		{"unknown algorithm in memory", limiterConfig{algorithm: "leaky-bucket", rate: 10, burst: 20}, "<nil>", true},
+		{"unknown algorithm in redis", limiterConfig{algorithm: "leaky-bucket", redisAddr: mr.Addr(), rate: 10, burst: 20}, "<nil>", true},
+		{"invalid burst, rejected before connecting", limiterConfig{algorithm: "token-bucket", redisAddr: "127.0.0.1:1", rate: 10, burst: 0}, "<nil>", true},
+		{"redis unreachable", limiterConfig{algorithm: "sliding-window", redisAddr: "127.0.0.1:1", rate: 1, window: 10 * time.Second}, "<nil>", true},
+		{"invalid burst in memory", limiterConfig{algorithm: "token-bucket", rate: 10, burst: 0}, "<nil>", true},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -38,9 +38,9 @@ func main() {
 	healthInterval := flag.Duration("health-interval", 2*time.Second, "how often to probe each backend's /healthz")
 	healthTimeout := flag.Duration("health-timeout", time.Second, "how long a probe may take before the backend counts as down")
 	rate := flag.Float64("rate", 10, "requests per second allowed per client IP; 0 turns rate limiting off")
-	algorithm := flag.String("algorithm", "token-bucket", "rate-limit algorithm: token-bucket (in memory) or fixed-window (needs -redis)")
+	algorithm := flag.String("algorithm", "token-bucket", "rate-limit algorithm: token-bucket, or with -redis also sliding-window or fixed-window")
 	burst := flag.Int("burst", 20, "token-bucket only: requests a client may make at once before -rate applies")
-	window := flag.Duration("window", 10*time.Second, "fixed-window only: window length; each window allows -rate x -window requests")
+	window := flag.Duration("window", 10*time.Second, "sliding-window and fixed-window: window length; a window allows -rate x -window requests")
 	redisAddr := flag.String("redis", "", "Redis address, e.g. 127.0.0.1:6379, so every proxy replica shares the same limits")
 	flag.Parse()
 

@@ -38,10 +38,13 @@ redis:
 redis-stop:
 	docker stop ratelimiter-redis
 
-# Two proxy replicas on :8080 and :8081 sharing one fixed-window limit in Redis
-# (10 requests per 10s per client). Needs `make redis` and `make backends`.
+# Two proxy replicas on :8080 and :8081 sharing one limit in Redis: 10 requests per client,
+# refilling at 1 per second (token-bucket) or 10 per 10s (sliding-window, fixed-window).
+# Needs `make redis` and `make backends`. Pick the algorithm with ALGORITHM=...
+ALGORITHM ?= token-bucket
+LIMIT_FLAGS = -redis 127.0.0.1:6379 -algorithm $(ALGORITHM) -rate 1 -burst 10 -window 10s
 replicas: build
 	@trap 'kill 0' INT TERM; \
-	./bin/proxy -addr localhost:8080 -redis 127.0.0.1:6379 -algorithm fixed-window -rate 1 -window 10s & \
-	./bin/proxy -addr localhost:8081 -redis 127.0.0.1:6379 -algorithm fixed-window -rate 1 -window 10s & \
+	./bin/proxy -addr localhost:8080 $(LIMIT_FLAGS) & \
+	./bin/proxy -addr localhost:8081 $(LIMIT_FLAGS) & \
 	wait

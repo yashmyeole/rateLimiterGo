@@ -12,11 +12,11 @@ import (
 
 // limiterConfig is what the rate-limit flags ask for.
 type limiterConfig struct {
-	algorithm string        // "token-bucket" (in memory) or "fixed-window" (in Redis)
-	redisAddr string        // host:port; empty means no Redis
+	algorithm string        // "token-bucket", "sliding-window" or "fixed-window"
+	redisAddr string        // host:port; empty means in memory, token bucket only
 	rate      float64       // requests per second per client; 0 turns limiting off
 	burst     int           // token bucket only
-	window    time.Duration // fixed window only
+	window    time.Duration // sliding and fixed window only
 }
 
 // newLimiter builds the limiter cfg describes, or returns nil if rate limiting is off.
@@ -28,39 +28,50 @@ func newLimiter(ctx context.Context, cfg limiterConfig) (limit.Limiter, func(), 
 		return nil, noop, nil
 	}
 
-	switch {
-	case cfg.algorithm == "token-bucket" && cfg.redisAddr == "":
+	if cfg.redisAddr == "" {
+		if cfg.algorithm != "token-bucket" {
+			return nil, noop, fmt.Errorf("-algorithm %s needs -redis; only token-bucket runs in memory", cfg.algorithm)
+		}
 		tb, err := limit.NewTokenBucket(cfg.rate, cfg.burst)
 		if err != nil {
 			return nil, noop, err
 		}
 		go tb.RunJanitor(ctx, janitorInterval)
 		return tb, noop, nil
-
-	case cfg.algorithm == "fixed-window" && cfg.redisAddr != "":
-		rdb := redis.NewClient(&redis.Options{
-			Addr: cfg.redisAddr,
-			// go-redis waits seconds by default; a rate check shouldn't hold a request
-			// that long when Redis is slow or gone.
-			DialTimeout:  time.Second,
-			ReadTimeout:  500 * time.Millisecond,
-			WriteTimeout: 500 * time.Millisecond,
-		})
-		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if err := rdb.Ping(pingCtx).Err(); err != nil {
-			rdb.Close()
-			return nil, noop, fmt.Errorf("redis at %s: %w", cfg.redisAddr, err)
-		}
-		fw, err := limit.NewFixedWindow(rdb, cfg.rate, cfg.window)
-		if err != nil {
-			rdb.Close()
-			return nil, noop, err
-		}
-		return fw, func() { rdb.Close() }, nil
-
-	default:
-		return nil, noop, fmt.Errorf("-algorithm %q with -redis %q: use token-bucket without -redis, or fixed-window with -redis",
-			cfg.algorithm, cfg.redisAddr)
 	}
+
+	// NewClient doesn't connect yet, so a bad flag fails below before any network call.
+	rdb := redis.NewClient(&redis.Options{
+		Addr: cfg.redisAddr,
+		// go-redis waits seconds by default; a rate check shouldn't hold a request
+		// that long when Redis is slow or gone.
+		DialTimeout:  time.Second,
+		ReadTimeout:  500 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond,
+	})
+
+	var l limit.Limiter
+	var err error
+	switch cfg.algorithm {
+	case "token-bucket":
+		l, err = limit.NewRedisTokenBucket(rdb, cfg.rate, cfg.burst)
+	case "sliding-window":
+		l, err = limit.NewSlidingWindow(rdb, cfg.rate, cfg.window)
+	case "fixed-window":
+		l, err = limit.NewFixedWindow(rdb, cfg.rate, cfg.window)
+	default:
+		err = fmt.Errorf("unknown -algorithm %q: want token-bucket, sliding-window or fixed-window", cfg.algorithm)
+	}
+	if err != nil {
+		rdb.Close()
+		return nil, noop, err
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		rdb.Close()
+		return nil, noop, fmt.Errorf("redis at %s: %w", cfg.redisAddr, err)
+	}
+	return l, func() { rdb.Close() }, nil
 }

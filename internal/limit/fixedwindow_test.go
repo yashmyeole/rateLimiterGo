@@ -24,7 +24,7 @@ func newFixedWindows(t *testing.T, n int, rate float64, window time.Duration) ([
 
 	var fws []*FixedWindow
 	for range n {
-		rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1}) // fail fast when Redis is down
 		t.Cleanup(func() { rdb.Close() })
 		fw, err := NewFixedWindow(rdb, rate, window)
 		if err != nil {

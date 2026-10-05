@@ -8,7 +8,9 @@ deployment would do.
 
 - Apple M4, 10 cores (4 performance, 6 efficiency), 16 GB RAM, macOS 26.6.2, on AC power
 - Go 1.27.1
-- Measured 2026-10-01
+- Redis 8.10.2 (`redis:8.10-alpine`) in Docker Desktop 29.8.0, reached through Docker's port
+  forwarding on 127.0.0.1:6379
+- Measured 2026-10-01 (in-memory limiter) and 2026-10-02 (Redis)
 
 ## Rate limiter: one lock vs. the alternatives
 
@@ -107,6 +109,46 @@ after a sweep; between sweeps the map refills with new clients and the heap rise
 - **After a spike.** With the current code, 1,000,000 clients took the heap to 117.8 MB; once
   they went idle, one sweep brought it back to 0.8 MB.
 
+## Redis-backed limiters
+
+### Atomicity: read-then-write vs. a Lua script
+
+`TestLostUpdate` in `internal/limit/redis_live_test.go` puts the same load on two token
+buckets in Redis: a naive one that reads the bucket, does the math in Go and writes it back,
+and the Lua script the proxy uses, where Redis runs the whole read-compute-write as one step.
+Burst 10, almost no refill, requests spread over two clients (two proxy replicas), 200
+requests per round, 3 rounds per scenario:
+
+| scenario                          | read-then-write allowed | Lua script allowed |
+|-----------------------------------|------------------------:|-------------------:|
+| one request at a time             |            10, 10, 10   |        10, 10, 10  |
+| 10 workers, 20 requests each      |            50, 58, 67   |        10, 10, 10  |
+| 200 requests at once              |         200, 200, 200   |        10, 10, 10  |
+
+With no overlap the naive version is correct, so everything above 10 in the other rows is
+lost updates: two requests read the same token count and both spend the same token. With
+200 requests at once, every read landed before the first write and nothing was limited.
+
+### Cost per decision
+
+`BenchmarkRedisAllow` makes one decision per operation against the Redis above, spread over
+10,000 clients, with limits high enough that everything passes. Median of 5 runs:
+
+| algorithm      | 1 goroutine (latency) | 10 CPUs (throughput)               |
+|----------------|----------------------:|-----------------------------------:|
+| token-bucket   |                410 µs |  105 µs per decision, 9,500 per s  |
+| sliding-window |                393 µs |   96 µs per decision, 10,400 per s |
+| fixed-window   |                387 µs |   88 µs per decision, 11,300 per s |
+
+The in-memory token bucket takes about 50 ns per decision on one CPU, so sharing limits
+through Redis costs roughly 8,000 times more per request on this setup.
+
+Almost all of that is the network path, not the scripts: a bare `PING` from the host takes
+418 µs (median of 5), the same as a full decision. Measured inside the container, without
+Docker Desktop's port forwarding, Redis answers in about 0.07 ms on average. A Redis on a
+real network will have its own, different round-trip time; this number only says that the
+Lua scripts themselves are cheap.
+
 ## Reproducing
 
 ```sh
@@ -121,4 +163,9 @@ go tool pprof -top limit.test cpu.out
 
 SOAK=2m  go test -run 'TestSoak/no-janitor' -v -timeout 0 ./internal/limit   # the leak
 SOAK=10m make soak                                                          # with the janitor
+
+# Redis-backed limiters (needs a real Redis)
+make redis
+REDIS_ADDR=127.0.0.1:6379 go test -run TestLostUpdate -v ./internal/limit
+REDIS_ADDR=127.0.0.1:6379 go test -run '^$' -bench BenchmarkRedisAllow -benchmem -cpu 1,10 -count 5 ./internal/limit
 ```

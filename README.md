@@ -3,9 +3,10 @@
 A reverse proxy with a distributed rate limiter, written in Go. Built to learn Go and
 backend fundamentals.
 
-**Status:** work in progress. The proxy rate-limits each client IP, in memory (token bucket) or
-shared across replicas in Redis (fixed window), load-balances across healthy backends and shuts
-down gracefully. Next: an atomic token bucket and sliding window in Redis using Lua.
+**Status:** work in progress. The proxy rate-limits each client IP, in memory or shared across
+replicas in Redis (token bucket, sliding window or fixed window, as atomic Lua scripts),
+load-balances across healthy backends and shuts down gracefully. Next: staying up when Redis
+goes down.
 
 ## Goal
 
@@ -57,14 +58,24 @@ every replica. `-redis` moves the count into Redis so all replicas share it:
 ```sh
 make redis                           # Redis 8.10 in Docker, published on 127.0.0.1:6379 only
 make backends                        # terminal 1
-make replicas                        # terminal 2: proxies on :8080 and :8081, 10 requests per 10s per client
+make replicas                        # terminal 2: proxies on :8080 and :8081 sharing one limit
 for i in $(seq 20); do curl -s -o /dev/null -w "%{http_code} " localhost:$((8080 + i % 2))/api/users; done; echo
+make replicas ALGORITHM=sliding-window   # or fixed-window
 make redis-stop
 ```
 
-This uses a fixed window (`-algorithm fixed-window`, `-rate 1 -window 10s`): one counter per
-client per window. It has a known weakness at window boundaries, measured in
-[docs/decisions.md](docs/decisions.md).
+With `-redis`, `-algorithm` picks one of three, all sharing `-rate`:
+
+| algorithm        | limit                                                  | flags     |
+|------------------|--------------------------------------------------------|-----------|
+| `token-bucket`   | bursts of `-burst`, then `-rate` per second (default)  | `-burst`  |
+| `sliding-window` | `-rate` x `-window` requests in any window-long span   | `-window` |
+| `fixed-window`   | `-rate` x `-window` requests per clock window          | `-window` |
+
+The token bucket and sliding window run as Lua scripts inside Redis, so each check is atomic
+and uses Redis's clock rather than each proxy's. The fixed window lets a client through twice
+at a window boundary; it stays for comparison. Measurements and trade-offs are in
+[docs/decisions.md](docs/decisions.md) and [docs/RESULTS.md](docs/RESULTS.md).
 
 Every `-health-interval` (default 2s) the proxy probes each backend's `/healthz` and stops
 sending traffic to any that fail; they rejoin once a probe passes. If no backend is healthy
@@ -87,8 +98,8 @@ the limiter benchmarks and `SOAK=10m make soak` a memory soak; measured numbers 
 - `cmd/backend/`: fake API service used as the proxy's target
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
 - `internal/proxy/`: request forwarding, round-robin load balancing, health checks, backend error handling
-- `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, Redis fixed
-  window, rate-limit middleware
+- `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, Redis
+  token bucket and sliding window (Lua) and fixed window, rate-limit middleware
 - `internal/`: metrics package (coming)
 - `docs/RESULTS.md`: measured numbers and how to reproduce them
 - `docs/decisions.md`: design decisions and their trade-offs

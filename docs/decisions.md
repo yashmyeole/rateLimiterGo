@@ -3,6 +3,55 @@
 Short records of the choices that shaped the code: what was decided, why, and what it
 costs. Measured numbers come from the machine described in [RESULTS.md](RESULTS.md).
 
+## Token bucket and sliding window run as Lua scripts inside Redis
+
+**Decision.** The Redis token bucket and sliding window are Lua scripts
+(`internal/limit/tokenbucket.lua`, `slidingwindow.lua`). Each request runs one script that
+reads the client's state, does the math, and writes it back.
+
+**Why.** Both algorithms need a read, a calculation and a write. Done as separate commands
+from Go, two requests can read the same state and both act on it. Measured with a burst of
+10 and 200 requests over two replicas (details in [RESULTS.md](RESULTS.md)): the
+read-then-write version allowed 50 to 67 when 10 workers sent 20 requests each, and all 200
+when they arrived at once. Redis runs a script as one step with nothing in between, and the
+Lua version allowed exactly 10 every time.
+
+The proxy sends `EVALSHA` with the script's hash, not the source. If Redis no longer has the
+script cached (after a restart or `SCRIPT FLUSH`), go-redis's `Script.Run` resends it with
+`EVAL`; `TestScriptsSurviveScriptFlush` covers that. The token bucket script is checked
+against the in-memory Go version: both get the same random traffic on the same clock and
+every decision must match (`TestRedisTokenBucketMatchesInMemory`).
+
+**Cost.** One Redis round trip per request: about 0.4 ms on the development machine, nearly
+all of it network. The scripts themselves are cheap.
+
+## Time comes from Redis, and each client's state is one key
+
+**Decision.** The scripts read the time with Redis's `TIME` command instead of receiving it
+from the proxy. The sliding window keeps a client's state (window start, current count,
+previous count) in one hash and moves to a new window inside the script.
+
+**Why.** Proxy replicas' clocks drift apart. If each proxy decided which window a request
+belongs to, replicas would disagree near every boundary (the second flaw of the fixed window
+below). The usual sliding-window design uses one key per window, which means the caller
+names the key from its own clock; keeping one key per client and rotating inside the script
+avoids that. Keys look like `rl:tb:{1.2.3.4}`: the braces make Redis Cluster put everything
+for one client on the same node, so the scripts would also work on a cluster.
+
+## The sliding window is an estimate
+
+**Decision.** The sliding window is a sliding-window counter, not a sliding log.
+
+**Why.** A sliding log stores a timestamp for every request and counts those in the last
+window: exact, but memory grows with traffic. The counter stores two numbers per client and
+estimates the last window as the previous window's count, weighted by how much of it still
+overlaps, plus the current count. It assumes the previous window's requests were spread
+evenly, which can be off when they were bunched up.
+
+**Result.** It removes the fixed window's boundary burst. With two replicas and 10 requests
+per 10 seconds, 10 requests just before a boundary were allowed and the 10 sent 0.45 s later,
+just after it, were all refused (the fixed window allowed all 20).
+
 ## Fixed window in Redis is the first distributed limiter, and it has a known flaw
 
 **Decision.** The first limiter shared across proxy replicas is a fixed window in Redis:
@@ -26,8 +75,9 @@ of a fixed window. `TestFixedWindowBoundaryBurst` keeps this behavior pinned dow
 computed from the proxy's own clock. Replicas whose clocks disagree by a few hundred
 milliseconds also disagree on where windows start, which widens the boundary problem.
 
-**Next.** A token bucket and a sliding-window counter in Redis, both computed inside a Lua
-script so the read-and-update is atomic and time comes from Redis, not from each proxy.
+**What replaced it.** The token bucket and sliding window above, both computed inside Redis
+from Redis's own clock. The fixed window stays available (`-algorithm fixed-window`) for
+comparison.
 
 ## Rate limits live in Redis, shared by all replicas
 
@@ -39,8 +89,8 @@ them: 20 allowed (10 per replica). With the fixed window in Redis, the same 40 r
 exactly 10, and 200 requests sent at once across both replicas also got exactly 10, because
 `INCR` is atomic in Redis.
 
-**Cost.** Every request now makes a network round trip to Redis, and a Redis outage
-becomes a rate-limiter outage. For now the middleware fails open (requests are allowed when
+**Cost.** Every request now makes a network round trip to Redis (about 0.4 ms here), and a
+Redis outage becomes a rate-limiter outage. For now the middleware fails open (requests are allowed when
 the limiter errors); a fallback for when Redis is down comes later.
 
 ## INCR and EXPIRE are sent together in one transaction
