@@ -5,8 +5,8 @@ backend fundamentals.
 
 **Status:** work in progress. The proxy rate-limits each client IP, in memory or shared across
 replicas in Redis (token bucket, sliding window or fixed window, as atomic Lua scripts),
-load-balances across healthy backends and shuts down gracefully. Next: staying up when Redis
-goes down.
+keeps serving when Redis fails, load-balances across healthy backends and shuts down
+gracefully. Next: Prometheus metrics and a Grafana dashboard.
 
 ## Goal
 
@@ -77,6 +77,28 @@ and uses Redis's clock rather than each proxy's. The fixed window lets a client 
 at a window boundary; it stays for comparison. Measurements and trade-offs are in
 [docs/decisions.md](docs/decisions.md) and [docs/RESULTS.md](docs/RESULTS.md).
 
+### When Redis goes down
+
+Each check in Redis has a time budget (`-redis-timeout`, default 50 ms). After 3 failures in
+a row a circuit breaker stops calling Redis for 2 seconds, then lets one request try again.
+Meanwhile `-redis-fallback` decides:
+
+| `-redis-fallback` | while Redis is down                                                     |
+|-------------------|-------------------------------------------------------------------------|
+| `local` (default) | each replica limits alone with `1/-replicas` of the limit               |
+| `open`            | every request is allowed                                                |
+| `closed`          | every request gets `503` with `Retry-After`                             |
+
+The proxy also starts when Redis is unreachable, on the fallback. In a drill with two
+replicas under steady load, stopping Redis for 8 seconds caused no failed requests and the
+limit held at 10 per second throughout ([docs/RESULTS.md](docs/RESULTS.md)).
+
+```sh
+make replicas                                   # with make redis and make backends running
+docker stop ratelimiter-redis                   # requests keep flowing, limits stay in place
+make redis                                      # shared limits resume
+```
+
 Every `-health-interval` (default 2s) the proxy probes each backend's `/healthz` and stops
 sending traffic to any that fail; they rejoin once a probe passes. If no backend is healthy
 it answers `503`. Ctrl-C (or SIGTERM) stops new connections and lets in-flight requests
@@ -99,7 +121,8 @@ the limiter benchmarks and `SOAK=10m make soak` a memory soak; measured numbers 
 - `cmd/proxy/`: the proxy binary (flags, HTTP server)
 - `internal/proxy/`: request forwarding, round-robin load balancing, health checks, backend error handling
 - `internal/limit/`: `Limiter` interface, in-memory token bucket with idle eviction, Redis
-  token bucket and sliding window (Lua) and fixed window, rate-limit middleware
+  token bucket and sliding window (Lua) and fixed window, circuit breaker and fallback,
+  rate-limit middleware
 - `internal/`: metrics package (coming)
 - `docs/RESULTS.md`: measured numbers and how to reproduce them
 - `docs/decisions.md`: design decisions and their trade-offs

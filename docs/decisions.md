@@ -3,6 +3,65 @@
 Short records of the choices that shaped the code: what was decided, why, and what it
 costs. Measured numbers come from the machine described in [RESULTS.md](RESULTS.md).
 
+## A slow or dead Redis is bounded, then routed around
+
+**Decision.** Every Redis-backed limiter is wrapped (`internal/limit/resilient.go`) in three
+layers:
+
+1. **A time budget.** Each check gets `-redis-timeout` (default 50 ms).
+2. **A circuit breaker.** After 3 failures in a row it opens and the proxy stops calling
+   Redis for 2 seconds. Then exactly one request tries Redis: success closes the breaker,
+   failure opens it for another 2 seconds. Each state change is logged once, instead of one
+   error line per request.
+3. **A fallback** while the breaker is open (`-redis-fallback`, next entry).
+
+**Why.** Without a budget, a hung Redis holds every request; without the breaker, a dead one
+costs every request a timeout. Chaos drill with two replicas sharing a limit of 10 requests
+per second, 40 requests per second of load, Redis broken for 8 seconds (full tables in
+[RESULTS.md](RESULTS.md)):
+
+| Redis failure         | failed requests | allowed per second during the outage | slowest request |
+|-----------------------|----------------:|-------------------------------------:|----------------:|
+| stopped (`docker stop`)  |        0 of 880 |                                   10 |            51 ms |
+| frozen (`docker pause`)  |        0 of 880 |                                   10 |            54 ms |
+
+**Two go-redis defaults had to change.**
+
+- `ContextTimeoutEnabled` is off by default, and then go-redis ignores context deadlines for
+  network reads and writes. The same frozen-Redis drill with it off: requests stalled for up
+  to 5.0 seconds and the allowed rate dropped to between 0 and 9 per second.
+- Failed dials are retried separately from `MaxRetries`: 5 attempts, 100 ms apart. Against
+  a stopped Redis every check used its whole 50 ms budget on dials that could not succeed.
+  `DialerRetries: 1` (it counts attempts; 0 or less means the default of 5) makes a refused
+  connection fail at once; requests during the outage then took 2 to 3 ms.
+
+## While Redis is down: a local limit by default, open or closed on request
+
+**Decision.** `-redis-fallback local` (default) gives each replica an in-memory token bucket
+with `1/-replicas` of the limit. `open` allows everything. `closed` refuses everything with
+`503`, not `429`: the client did nothing wrong, and a 429 would tell it otherwise.
+
+**When each is right.**
+
+- **local** keeps both availability and roughly the same protection: the replicas together
+  allow about the configured total, as long as traffic spreads evenly across them. In the
+  drill the limit held at 10 per second throughout. It goes wrong if `-replicas` is wrong or
+  traffic is lopsided, and each switch starts the local buckets full, allowing one extra
+  burst (visible as 18 to 19 instead of 10 in the second the outage starts).
+- **open** suits limits that exist for fairness rather than protection: an outage of the
+  limiter shouldn't become an outage of the API.
+- **closed** suits limits that protect something fragile or expensive, where letting
+  everything through for a while is worse than refusing.
+
+## The proxy starts even if Redis is down
+
+**Decision.** If Redis doesn't answer at startup the proxy logs a warning and starts on the
+fallback, instead of exiting.
+
+**Why.** Otherwise every Redis outage also blocks deploys and restarts of the proxy, turning
+a degraded rate limiter into no proxy at all. The cost: a mistyped `-redis` address doesn't
+stop the proxy; it shows up as the warning and a breaker that never closes.
+
 ## Token bucket and sliding window run as Lua scripts inside Redis
 
 **Decision.** The Redis token bucket and sliding window are Lua scripts
@@ -89,9 +148,8 @@ them: 20 allowed (10 per replica). With the fixed window in Redis, the same 40 r
 exactly 10, and 200 requests sent at once across both replicas also got exactly 10, because
 `INCR` is atomic in Redis.
 
-**Cost.** Every request now makes a network round trip to Redis (about 0.4 ms here), and a
-Redis outage becomes a rate-limiter outage. For now the middleware fails open (requests are allowed when
-the limiter errors); a fallback for when Redis is down comes later.
+**Cost.** Every request now makes a network round trip to Redis (about 0.4 ms here), and
+Redis becomes something that can fail. How the proxy survives that is the first entry above.
 
 ## INCR and EXPIRE are sent together in one transaction
 

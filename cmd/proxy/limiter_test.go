@@ -11,6 +11,12 @@ import (
 
 func TestNewLimiter(t *testing.T) {
 	mr := miniredis.RunT(t)
+	redisCfg := func(algorithm, fallback string) limiterConfig {
+		return limiterConfig{
+			algorithm: algorithm, redisAddr: mr.Addr(), rate: 1, burst: 10, window: 10 * time.Second,
+			redisTimeout: 50 * time.Millisecond, fallback: fallback, replicas: 2,
+		}
+	}
 
 	tests := []struct {
 		name     string
@@ -20,15 +26,24 @@ func TestNewLimiter(t *testing.T) {
 	}{
 		{"off", limiterConfig{algorithm: "token-bucket", rate: 0}, "<nil>", false},
 		{"token bucket in memory", limiterConfig{algorithm: "token-bucket", rate: 10, burst: 20}, "*limit.TokenBucket", false},
-		{"token bucket in redis", limiterConfig{algorithm: "token-bucket", redisAddr: mr.Addr(), rate: 10, burst: 20}, "*limit.RedisTokenBucket", false},
-		{"sliding window in redis", limiterConfig{algorithm: "sliding-window", redisAddr: mr.Addr(), rate: 1, window: 10 * time.Second}, "*limit.SlidingWindow", false},
-		{"fixed window in redis", limiterConfig{algorithm: "fixed-window", redisAddr: mr.Addr(), rate: 1, window: 10 * time.Second}, "*limit.FixedWindow", false},
+		{"token bucket in redis", redisCfg("token-bucket", "local"), "*limit.Resilient", false},
+		{"sliding window in redis", redisCfg("sliding-window", "local"), "*limit.Resilient", false},
+		{"fixed window in redis", redisCfg("fixed-window", "local"), "*limit.Resilient", false},
+		{"fail open", redisCfg("token-bucket", "open"), "*limit.Resilient", false},
+		{"fail closed", redisCfg("token-bucket", "closed"), "*limit.Resilient", false},
 		{"sliding window needs redis", limiterConfig{algorithm: "sliding-window", rate: 1, window: 10 * time.Second}, "<nil>", true},
 		{"fixed window needs redis", limiterConfig{algorithm: "fixed-window", rate: 1, window: 10 * time.Second}, "<nil>", true},
 		{"unknown algorithm in memory", limiterConfig{algorithm: "leaky-bucket", rate: 10, burst: 20}, "<nil>", true},
-		{"unknown algorithm in redis", limiterConfig{algorithm: "leaky-bucket", redisAddr: mr.Addr(), rate: 10, burst: 20}, "<nil>", true},
-		{"invalid burst, rejected before connecting", limiterConfig{algorithm: "token-bucket", redisAddr: "127.0.0.1:1", rate: 10, burst: 0}, "<nil>", true},
-		{"redis unreachable", limiterConfig{algorithm: "sliding-window", redisAddr: "127.0.0.1:1", rate: 1, window: 10 * time.Second}, "<nil>", true},
+		{"unknown algorithm in redis", redisCfg("leaky-bucket", "local"), "<nil>", true},
+		{"unknown fallback", redisCfg("token-bucket", "maybe"), "<nil>", true},
+		{"zero replicas", func() limiterConfig { c := redisCfg("token-bucket", "local"); c.replicas = 0; return c }(), "<nil>", true},
+		{"invalid burst, rejected before connecting", func() limiterConfig {
+			c := redisCfg("token-bucket", "local")
+			c.redisAddr = "127.0.0.1:1"
+			c.burst = 0
+			return c
+		}(), "<nil>", true},
+		{"redis unreachable: starts on the fallback", func() limiterConfig { c := redisCfg("sliding-window", "local"); c.redisAddr = "127.0.0.1:1"; return c }(), "*limit.Resilient", false},
 		{"invalid burst in memory", limiterConfig{algorithm: "token-bucket", rate: 10, burst: 0}, "<nil>", true},
 	}
 

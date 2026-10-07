@@ -42,7 +42,7 @@ redis-stop:
 # refilling at 1 per second (token-bucket) or 10 per 10s (sliding-window, fixed-window).
 # Needs `make redis` and `make backends`. Pick the algorithm with ALGORITHM=...
 ALGORITHM ?= token-bucket
-LIMIT_FLAGS = -redis 127.0.0.1:6379 -algorithm $(ALGORITHM) -rate 1 -burst 10 -window 10s
+LIMIT_FLAGS = -redis 127.0.0.1:6379 -algorithm $(ALGORITHM) -rate 1 -burst 10 -window 10s -replicas 2
 replicas: build
 	@trap 'kill 0' INT TERM; \
 	./bin/proxy -addr localhost:8080 $(LIMIT_FLAGS) & \

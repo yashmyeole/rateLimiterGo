@@ -42,6 +42,9 @@ func main() {
 	burst := flag.Int("burst", 20, "token-bucket only: requests a client may make at once before -rate applies")
 	window := flag.Duration("window", 10*time.Second, "sliding-window and fixed-window: window length; a window allows -rate x -window requests")
 	redisAddr := flag.String("redis", "", "Redis address, e.g. 127.0.0.1:6379, so every proxy replica shares the same limits")
+	redisTimeout := flag.Duration("redis-timeout", 50*time.Millisecond, "time budget for each rate-limit check in Redis; slower checks use -redis-fallback")
+	redisFallback := flag.String("redis-fallback", "local", "while Redis is unavailable: local (each replica limits alone), open (allow all) or closed (refuse all with 503)")
+	replicas := flag.Int("replicas", 1, "proxy replicas sharing the Redis limits; the local fallback gives each 1/replicas of the limit")
 	flag.Parse()
 
 	targets, err := parseBackends(*backends)
@@ -64,6 +67,7 @@ func main() {
 
 	limiter, closeLimiter, err := newLimiter(ctx, limiterConfig{
 		algorithm: *algorithm, redisAddr: *redisAddr, rate: *rate, burst: *burst, window: *window,
+		redisTimeout: *redisTimeout, fallback: *redisFallback, replicas: *replicas,
 	})
 	if err != nil {
 		slog.Error("rate limiter setup failed", "err", err)
@@ -94,7 +98,7 @@ func main() {
 	// and reports how it ended on a channel.
 	slog.Info("proxy listening", "addr", *addr, "backends", *backends, "timeout", *timeout,
 		"health_interval", *healthInterval, "algorithm", *algorithm, "rate", *rate, "burst", *burst,
-		"window", *window, "redis", *redisAddr)
+		"window", *window, "redis", *redisAddr, "redis_fallback", *redisFallback, "replicas", *replicas)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 

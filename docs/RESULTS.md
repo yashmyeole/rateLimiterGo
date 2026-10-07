@@ -149,6 +149,42 @@ Docker Desktop's port forwarding, Redis answers in about 0.07 ms on average. A R
 real network will have its own, different round-trip time; this number only says that the
 Lua scripts themselves are cheap.
 
+## Chaos drill: Redis fails under load
+
+Two proxy replicas share a Redis token bucket (`-rate 10 -burst 10 -replicas 2`, fallback
+`local`). A load generator sends 40 requests per second, alternating replicas, for 22
+seconds. At 6 s Redis is broken, at 14 s it is repaired. Per second: requests answered 200,
+429, anything else, and the slowest response.
+
+Redis stopped (`docker stop`), then replaced with a new container:
+
+| second | 200 | 429 | other | slowest |
+|-------:|----:|----:|------:|--------:|
+|  4     |  10 |  30 |     0 |    6 ms |
+|  5     |  10 |  30 |     0 |    4 ms |
+|  6 (Redis stops)   |  19 |  21 |     0 |   51 ms |
+|  7     |  10 |  30 |     0 |    3 ms |
+|  8     |  10 |  30 |     0 |    3 ms |
+|  9     |  10 |  30 |     0 |    2 ms |
+| 10     |  10 |  30 |     0 |    2 ms |
+| 11     |  10 |  30 |     0 |    2 ms |
+| 12     |  10 |  30 |     0 |    3 ms |
+| 13     |  10 |  30 |     0 |    2 ms |
+| 14 (Redis back)    |  19 |  21 |     0 |    6 ms |
+| 15     |  10 |  30 |     0 |    4 ms |
+
+Whole run: 880 requests, none failed. The extra burst at 6 s is the local buckets starting
+full; at 14 s, the new Redis starting empty. Each replica logged one warning when Redis went
+away, one line per failed trial every 2 seconds, and one line when it came back.
+
+Redis frozen (`docker pause`), then unfrozen: also 880 requests, none failed, 10 allowed in
+every second of the outage, slowest response 54 ms. The first three checks per replica wait
+out the 50 ms budget, then the breaker opens; each later trial costs one request 50 ms.
+
+The same frozen-Redis drill with go-redis's `ContextTimeoutEnabled` turned off (a build made
+only for this comparison): requests stalled for up to 5.0 s, and between 0 and 9 requests
+were allowed per second instead of 10.
+
 ## Reproducing
 
 ```sh

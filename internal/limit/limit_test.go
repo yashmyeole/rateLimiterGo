@@ -78,9 +78,27 @@ func (failingLimiter) Allow(context.Context, string) (Decision, error) {
 	return Decision{}, errors.New("store unreachable")
 }
 
-func TestMiddlewareFailsOpen(t *testing.T) {
-	if rec := request(limited(failingLimiter{}), "1.2.3.4:5000", ""); rec.Code != http.StatusOK {
-		t.Errorf("limiter error: got %d, want 200 (fail open)", rec.Code)
+func TestMiddlewareLimiterErrorIs503(t *testing.T) {
+	rec := request(limited(failingLimiter{}), "1.2.3.4:5000", "")
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
+		t.Errorf("limiter error: got %d with Retry-After %q, want 503 with Retry-After 1",
+			rec.Code, rec.Header().Get("Retry-After"))
+	}
+}
+
+type openLimiter struct{}
+
+func (openLimiter) Allow(context.Context, string) (Decision, error) {
+	return Decision{Allowed: true}, nil // no limit known, as when failing open
+}
+
+func TestMiddlewareOmitsHeadersWithoutALimit(t *testing.T) {
+	rec := request(limited(openLimiter{}), "1.2.3.4:5000", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	if h := rec.Header().Get("X-RateLimit-Limit"); h != "" {
+		t.Errorf("X-RateLimit-Limit = %q with no known limit, want no header", h)
 	}
 }
 

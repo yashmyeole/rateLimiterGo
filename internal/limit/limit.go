@@ -5,7 +5,6 @@ package limit
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -29,23 +28,26 @@ type Limiter interface {
 }
 
 // Middleware rejects requests over the limit with 429 before they reach next.
-// Every response carries X-RateLimit-Limit and X-RateLimit-Remaining; a 429 also
-// carries Retry-After in whole seconds.
+// Responses carry X-RateLimit-Limit and X-RateLimit-Remaining when the limit is known; a
+// 429 also carries Retry-After in whole seconds. If the limiter can't decide at all
+// (Resilient in FailClosed mode while Redis is down), the request gets a 503.
 func Middleware(l Limiter, keyOf func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			d, err := l.Allow(r.Context(), keyOf(r))
 			if err != nil {
-				// Fail open for now: a broken limiter shouldn't take the whole API down.
-				// Whether to fail open or closed becomes a setting once a Redis-backed
-				// limiter exists.
-				slog.Error("rate limiter failed, allowing request", "err", err)
-				next.ServeHTTP(w, r)
+				// Not a 429: the client did nothing wrong. Whether to fail open, closed or
+				// to a local limiter is the limiter's policy (see Resilient); an error
+				// that reaches here means closed.
+				w.Header().Set("Retry-After", "1")
+				writeJSONError(w, http.StatusServiceUnavailable, "rate limiter unavailable")
 				return
 			}
 
-			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(d.Limit))
-			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(d.Remaining))
+			if d.Limit > 0 { // 0 means no limit is known, e.g. while failing open
+				w.Header().Set("X-RateLimit-Limit", strconv.Itoa(d.Limit))
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(d.Remaining))
+			}
 			if !d.Allowed {
 				w.Header().Set("Retry-After", strconv.Itoa(retrySeconds(d.RetryAfter)))
 				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
